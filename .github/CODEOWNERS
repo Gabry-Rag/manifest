@@ -1,0 +1,4 @@
+# Authoritative Code Ownership Specification for SevenLab Manifest CDN
+# Ensures that only the primary author/administrator can approve changes or modifications.
+
+* @Gabry-Rag
