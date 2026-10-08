@@ -1,0 +1,12 @@
+{
+  "version": 2,
+  "manifest_sha256": "364a72888d4fee2981262013f21aed2a53122b6e61be05309d6342a2304c73fe",
+  "manifest_size_bytes": 448,
+  "payload_sha256": "951bc755f20f9bbe38399c66d3e9cb34515e71bec758ae922dd64846afcb604e",
+  "payload_size_bytes": 384,
+  "num_authorized": 2,
+  "num_revoked": 1,
+  "issued_at_utc": "2026-10-07T19:37:25+00:00",
+  "valid_until_utc": "2027-10-06T00:00:00+00:00",
+  "issuer_public_key": "9f78ada70485c96d0e596b326f95423850a52660dadcb55d56a0c1e51f4a0ff2"
+}
