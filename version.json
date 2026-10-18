@@ -1,14 +1,14 @@
 {
   "version": 3,
-  "manifest_epoch": 16,
-  "manifest_sha256": "2af330d6d0685fc26c06a435d726fc3e6e8df22770408f0e1c92a3ef2b94f9f8",
-  "manifest_size_bytes": 488,
-  "payload_sha256": "818d02cb283d62a6eaad6b6904ed179e96b3fcefac536d71d006a060303ab671",
-  "payload_size_bytes": 424,
-  "num_authorized": 2,
+  "manifest_epoch": 29,
+  "manifest_sha256": "f44c7aa6cf188d6f4980e34888348087e43220fe4caa7d57d8bc48b0e32e7d1f",
+  "manifest_size_bytes": 312,
+  "payload_sha256": "fcadfb23159534da35a49eec4ea7f8b7514fcd69115395b1d0338d5ee1dbba69",
+  "payload_size_bytes": 248,
+  "num_authorized": 1,
   "num_revoked": 1,
-  "compiled_at_utc": "2026-10-16T06:02:04+00:00",
-  "issued_at_utc": "2026-10-16T06:02:04+00:00",
-  "valid_until_utc": "2027-02-05T23:59:59+00:00",
+  "compiled_at_utc": "2026-10-18T13:13:23+00:00",
+  "issued_at_utc": "2026-10-18T13:13:23+00:00",
+  "valid_until_utc": "2028-12-31T23:59:59+00:00",
   "issuer_public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
 }
