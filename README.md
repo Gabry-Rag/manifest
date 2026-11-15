@@ -5,8 +5,12 @@ This repository hosts the compiled and cryptographically signed authorization ma
 ## Structure
 - `auth_manifest.bin`: Binary 7LMF v3 container containing authorized machine hashes, entitlement flags, quorum verification vectors, and cryptographic signature.
 - `auth_manifest.sig`: Detached Ed25519 signature.
-- `version.json`: Cryptographic integrity metadata and digests.
+- `version.json`: Cryptographic integrity metadata, digests, `version_policies`, and offline lease defaults (rolling 14-day TTL).
 
 ## Verification
 All artifacts are signed by the Device Manifest Authority and verified using the public key:
-`2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12`
+`9f78ada70485c96d0e596b326f95423850a52660dadcb55d56a0c1e51f4a0ff2`
+
+## License & Intellectual Property
+**Copyright © 2024–2027 Gabriele Ragonesi (SevenLab). All rights reserved.**  
+Exclusive intellectual property pursuant to **art. 12-bis L. 633/1941**. See [LICENSE](LICENSE).
