@@ -8,8 +8,11 @@ This repository hosts the compiled and cryptographically signed authorization ma
 - `version.json`: Cryptographic integrity metadata, digests, `version_policies`, and offline lease defaults (rolling 14-day TTL).
 
 ## Verification
-All artifacts are signed by the Device Manifest Authority and verified using the public key:
-`9f78ada70485c96d0e596b326f95423850a52660dadcb55d56a0c1e51f4a0ff2`
+All artifacts are signed by the Device Manifest Authority and verified using the official public key:
+`7b094398579995aa70abcf53a8adb9b1b907da58090bc48af7142d4c8ab25196`
+
+## Device Onboarding Relay
+Public self-service workstation accreditation requests (`device-request` issues) are validated by `.github/workflows/relay_device_request.yml`, sanitized immediately on closure, and dispatched to the private authority repository.
 
 ## License & Intellectual Property
 **Copyright © 2024–2027 Gabriele Ragonesi (SevenLab). All rights reserved.**  
