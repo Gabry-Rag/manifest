@@ -1,17 +1,17 @@
 {
   "version": 3,
-  "manifest_epoch": 30,
-  "manifest_sha256": "a8d1b967acdc276caddf13e157a1677920c3c1a60dfaf008f31856f8efcb5e71",
+  "manifest_epoch": 103,
+  "manifest_sha256": "45aabb27b451608f93aee11aa98d20e839f363ed7480e39e8e711cfdeb3cb1ee",
   "manifest_size_bytes": 312,
-  "payload_sha256": "81370595609518bd96c630143c8b220202666bc554a7ea58080a187bbb6d9ab5",
+  "payload_sha256": "213ed775d30a6f1953fa084bd7638bbfa18b41ccf0768b9a86f3bb01ac4f5f93",
   "payload_size_bytes": 248,
   "num_authorized": 1,
   "num_revoked": 1,
-  "compiled_at_utc": "2026-10-20T08:09:31+00:00",
-  "issued_at_utc": "2026-10-20T08:09:31+00:00",
-  "valid_until_utc": "2028-12-31T23:59:59+00:00",
-  "issuer_public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "compiled_at_utc": "2026-11-15T11:00:31+00:00",
+  "issued_at_utc": "2026-11-15T11:00:31+00:00",
+  "valid_until_utc": "2026-11-29T11:00:31+00:00",
   "manifest_ttl_days": 14,
   "default_offline_lease_hours": 72,
-  "version_policies": {}
+  "version_policies": {},
+  "issuer_public_key": "7b094398579995aa70abcf53a8adb9b1b907da58090bc48af7142d4c8ab25196"
 }
