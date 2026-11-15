@@ -10,5 +10,8 @@
   "compiled_at_utc": "2026-10-20T08:09:31+00:00",
   "issued_at_utc": "2026-10-20T08:09:31+00:00",
   "valid_until_utc": "2028-12-31T23:59:59+00:00",
-  "issuer_public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+  "issuer_public_key": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "manifest_ttl_days": 14,
+  "default_offline_lease_hours": 72,
+  "version_policies": {}
 }
