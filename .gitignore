@@ -1,7 +1,8 @@
 # Agent session runtime & cache
 .agents/
 
-# OS temporary files
+# OS & temporary files
 Thumbs.db
 .DS_Store
 *.tmp
+*.tmp.*

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: SevenLab Documentazione & Supporto
+    url: https://github.com/Gabry-Rag/SevenLab
+    about: Le richieste hardware vengono inviate automaticamente dal client SevenLab o tramite il form Device Request.

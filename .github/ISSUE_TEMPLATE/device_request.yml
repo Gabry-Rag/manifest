@@ -1,0 +1,17 @@
+name: SevenLab Device Accreditation Request
+description: Richiesta strutturata di accreditamento hardware o sostituzione postazione (il payload viene redatto e chiuso automaticamente entro pochi secondi).
+title: "[Device Request] "
+labels: ["device-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Incolla il payload JSON generato dal client SevenLab (la issue verrà automaticamente sanificata e chiusa dal gateway crittografico).
+  - type: textarea
+    id: payload
+    attributes:
+      label: Payload Accreditamento 4D (JSON)
+      description: Contiene machine_hash, hardware_vector (cpuid, smbios, disk, guid) e friendly_label.
+      render: json
+    validations:
+      required: true
