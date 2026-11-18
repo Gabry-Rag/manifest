@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "generated_at_utc": "2026-11-18T07:18:35+00:00",
+  "allow_unknown_user_onboarding": false,
+  "allowed_user_hashes": [
+    "6adba5c1972813258d319c4240602bfe991e8e974aacd6b1fb1c49795a3c73b8",
+    "af3f4b61c09b1f6f134c2722e01aaf134ddc81166f56ae1e10b7880ef33068bd"
+  ]
+}
