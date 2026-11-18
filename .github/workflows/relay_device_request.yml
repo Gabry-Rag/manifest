@@ -32,12 +32,13 @@ jobs:
               title.startsWith('[Device Request]') ||
               title.startsWith('[Device Onboarding]') ||
               title.startsWith('[Device Swap]');
-            const hasHardwareJson =
+            const hasEnvelopeJson =
+              body.includes('"sealed"') ||
               body.includes('"hardware_vector"') ||
               body.includes('"machine_hash"') ||
               body.includes('"cpuid"');
 
-            const isDeviceRequest = isDeviceTitle || labels.includes('device-request') || hasHardwareJson;
+            const isDeviceRequest = isDeviceTitle || labels.includes('device-request') || hasEnvelopeJson;
             if (!isDeviceRequest) {
               core.info(`Issue #${issue.number} does not match device request criteria; ignoring.`);
               core.setOutput('is_device_request', 'false');
@@ -50,25 +51,25 @@ jobs:
             core.setOutput('issue_number', String(issue.number));
             core.setOutput('issue_title', title);
 
-            // Privacy-First Redaction: overwrite public issue body and close BEFORE verification/relay
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue.number,
-              body: '🔒 *Contenuto payload hardware rimosso automaticamente dal gateway SevenLab.*',
+              body: '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*',
               state: 'closed',
               state_reason: 'completed',
             });
-            core.info(`Issue #${issue.number} body redacted and closed immediately.`);
 
-      - name: Checkout Trusted Registry Snapshot (version.json)
+      - name: Checkout Relay Tooling and Allowlist Snapshot
         if: steps.capture_and_redact.outputs.is_device_request == 'true'
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
+            .github/scripts/relay_core.js
+            onboarding_allowlist.json
             version.json
 
-      - name: Cryptographic 4D Vector & Anti-Flooding Verification
+      - name: Verify Envelope, Allowlist & Rate Limit
         id: verify_payload
         if: steps.capture_and_redact.outputs.is_device_request == 'true'
         uses: actions/github-script@v7
@@ -76,124 +77,75 @@ jobs:
           RAW_BODY: ${{ steps.capture_and_redact.outputs.raw_body }}
           ISSUE_USER: ${{ steps.capture_and_redact.outputs.issue_user }}
           ISSUE_TITLE: ${{ steps.capture_and_redact.outputs.issue_title }}
+          ISSUE_NUMBER: ${{ steps.capture_and_redact.outputs.issue_number }}
         with:
           script: |
-            const crypto = require('crypto');
             const fs = require('fs');
+            const path = require('path');
+            const relay = require(path.resolve('.github/scripts/relay_core.js'));
 
             const issueUser = String(process.env.ISSUE_USER || '').trim();
             const rawBody = String(process.env.RAW_BODY || '');
             const issueTitle = String(process.env.ISSUE_TITLE || '');
+            const issueNumber = Number(process.env.ISSUE_NUMBER || context.payload.issue.number);
 
-            let jsonPayload = null;
-            const codeBlockMatch = rawBody.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-            const rawToParse = codeBlockMatch ? codeBlockMatch[1] : rawBody;
-
-            try {
-              jsonPayload = JSON.parse(rawToParse.trim());
-            } catch (err) {
-              core.setOutput('reject_reason', `Payload JSON malformato: ${err.message}`);
-              core.setFailed(`Failed to parse issue body as JSON: ${err.message}`);
-              return;
-            }
-
-            if (jsonPayload.username && String(jsonPayload.username).trim().replace(/^@+/, '').toLowerCase() !== issueUser.toLowerCase()) {
-              const msg = `Identity spoofing rejected: issue author @${issueUser} does not match payload username`;
-              core.setOutput('reject_reason', msg);
+            const fail = (code, msg) => {
+              core.setOutput('reject_code', code);
+              core.setOutput('reject_reason', relay.stripHex64(msg));
               core.setFailed(msg);
-              return;
-            }
-            jsonPayload.username = issueUser;
+            };
 
-            const isHex64 = (v) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
-            const deviceId = String(jsonPayload.device_id || jsonPayload.machine_hash || '').trim().toLowerCase();
-            const hw = jsonPayload.hardware_vector || {};
-            const cpuid = String(jsonPayload.cpuid || hw.cpuid_hash || '').trim().toLowerCase();
-            const smbios = String(jsonPayload.smbios || hw.smbios_hash || '').trim().toLowerCase();
-            const disk = String(jsonPayload.disk || hw.disk_serial_hash || '').trim().toLowerCase();
-            const guid = String(jsonPayload.guid || hw.machine_guid_hash || '').trim().toLowerCase();
-
-            if (!isHex64(deviceId)) {
-              core.setOutput('reject_reason', 'machine_hash/device_id non valido (attesi 64 caratteri hex).');
-              core.setFailed('Invalid machine_hash/device_id');
-              return;
-            }
-            for (const [k, v] of [['cpuid', cpuid], ['smbios', smbios], ['disk', disk], ['guid', guid]]) {
-              if (!isHex64(v)) {
-                core.setOutput('reject_reason', `Sub-vettore '${k}' non valido (attesi 64 caratteri hex).`);
-                core.setFailed(`Invalid hardware subvector: ${k}`);
-                return;
-              }
+            let envelope;
+            try {
+              envelope = relay.validateAndParseEnvelope(rawBody, issueUser, issueTitle);
+              core.setOutput('request_ref', envelope.request_ref || '');
+            } catch (err) {
+              return fail('invalid_envelope', err.message);
             }
 
-            const expectedComposite = crypto
-              .createHash('sha256')
-              .update('SevenLab-HardwareVector4-Composite\0', 'utf8')
-              .update(Buffer.from(cpuid + smbios + disk + guid, 'hex'))
-              .digest('hex')
-              .toLowerCase();
+            const allowlistObj = fs.existsSync('onboarding_allowlist.json')
+              ? JSON.parse(fs.readFileSync('onboarding_allowlist.json', 'utf8'))
+              : null;
+            const versionObj = fs.existsSync('version.json')
+              ? JSON.parse(fs.readFileSync('version.json', 'utf8'))
+              : null;
 
-            if (expectedComposite !== deviceId) {
-              core.setOutput('reject_reason', 'Composite SHA-256 mismatch tra machine_hash e vettore hardware 4D.');
-              core.setFailed(`Composite hash mismatch: expected ${expectedComposite}, got ${deviceId}`);
-              return;
+            const allowRes = relay.checkAllowlist(issueUser, allowlistObj, versionObj);
+            if (!allowRes.allowed) {
+              return fail('not_allowlisted', allowRes.reason);
             }
 
-            const swapFromRaw = jsonPayload.swap_from_hash || jsonPayload.old_machine_hash || null;
-            const swapFrom = swapFromRaw ? String(swapFromRaw).trim().toLowerCase() : null;
-            if (swapFrom && !isHex64(swapFrom)) {
-              core.setOutput('reject_reason', 'swap_from_hash non valido (attesi 64 caratteri hex).');
-              core.setFailed('Invalid swap_from_hash');
-              return;
+            const recentIssuesResp = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              creator: issueUser,
+              state: 'all',
+              per_page: 20,
+              sort: 'created',
+              direction: 'desc',
+            });
+
+            const rl = relay.rateLimitDecision(
+              recentIssuesResp.data,
+              Date.now(),
+              issueNumber,
+              envelope.request_ref
+            );
+            if (!rl.allowed) {
+              return fail(rl.duplicate ? 'duplicate_request' : 'rate_limited', rl.reason);
             }
 
-            if (fs.existsSync('version.json')) {
-              try {
-                const versionMeta = JSON.parse(fs.readFileSync('version.json', 'utf8'));
-                const allowUnknown = Boolean(versionMeta.allow_unknown_user_onboarding);
-                const allowedHashes = versionMeta.onboarding_allowed_user_hashes;
-                if (!allowUnknown && Array.isArray(allowedHashes) && allowedHashes.length > 0) {
-                  const userIdHash = crypto
-                    .createHash('sha256')
-                    .update(`SevenLab-User-Identity-v1:${issueUser.toLowerCase()}`, 'utf8')
-                    .digest('hex')
-                    .toLowerCase();
-                  if (issueUser.toLowerCase() !== 'gabry-rag' && !allowedHashes.includes(userIdHash)) {
-                    core.setOutput('reject_reason', 'Utente GitHub non presente nella lista autorizzata (anti-flooding gate).');
-                    core.setFailed(`Anti-DoS gate blocked unrecognized user @${issueUser}`);
-                    return;
-                  }
-                }
-              } catch (verErr) {
-                core.warning(`Unable to parse local version.json allowlist: ${verErr.message}`);
-              }
-            }
-
-            const isSwap = Boolean(jsonPayload.is_swap || jsonPayload.action === 'swap' || swapFrom || issueTitle.startsWith('[Device Swap]'));
-            jsonPayload.machine_hash = deviceId;
-            jsonPayload.device_id = deviceId;
-            jsonPayload.cpuid = cpuid;
-            jsonPayload.smbios = smbios;
-            jsonPayload.disk = disk;
-            jsonPayload.guid = guid;
-            jsonPayload.swap_from_hash = swapFrom;
-            jsonPayload.is_swap = isSwap;
-
-            core.setOutput('device_id', deviceId);
-            core.setOutput('username', issueUser);
-            core.setOutput('is_swap', isSwap ? 'true' : 'false');
-            core.setOutput('payload_json', JSON.stringify(jsonPayload));
+            const dispatchPayload = relay.buildDispatchPayload(envelope, issueNumber);
+            core.setOutput('dispatch_payload_json', JSON.stringify(dispatchPayload));
+            core.setOutput('validated', 'true');
 
       - name: Dispatch Verified Request to SevenLab-SideValidation
-        if: steps.verify_payload.outputs.device_id != ''
+        if: steps.verify_payload.outputs.validated == 'true'
         uses: actions/github-script@v7
         env:
           RELAY_PAT: ${{ secrets.SIDE_VALIDATION_RELAY_PAT }}
-          PAYLOAD_JSON: ${{ steps.verify_payload.outputs.payload_json }}
-          IS_SWAP: ${{ steps.verify_payload.outputs.is_swap }}
-          TARGET_USER: ${{ steps.verify_payload.outputs.username }}
-          TARGET_DEVICE: ${{ steps.verify_payload.outputs.device_id }}
-          ISSUE_NUMBER: ${{ steps.capture_and_redact.outputs.issue_number }}
+          DISPATCH_PAYLOAD_JSON: ${{ steps.verify_payload.outputs.dispatch_payload_json }}
+          TARGET_USER: ${{ steps.capture_and_redact.outputs.issue_user }}
         with:
           github-token: ${{ env.RELAY_PAT }}
           script: |
@@ -202,76 +154,63 @@ jobs:
               core.setFailed('Missing secret SIDE_VALIDATION_RELAY_PAT in manifest repository secrets.');
               return;
             }
-
-            const payload = JSON.parse(process.env.PAYLOAD_JSON || '{}');
-            const isSwap = process.env.IS_SWAP === 'true';
-            const username = String(process.env.TARGET_USER || '');
-            const deviceId = String(process.env.TARGET_DEVICE || '');
-            const issueNumber = Number(process.env.ISSUE_NUMBER || context.payload.issue.number);
-
+            const clientPayload = JSON.parse(process.env.DISPATCH_PAYLOAD_JSON || '{}');
             await github.rest.repos.createDispatchEvent({
               owner: 'Gabry-Rag',
               repo: 'SevenLab-SideValidation',
               event_type: 'device-onboarding',
-              client_payload: {
-                username,
-                machine_hash: deviceId,
-                device_id: deviceId,
-                cpuid: payload.cpuid,
-                smbios: payload.smbios,
-                disk: payload.disk,
-                guid: payload.guid,
-                label: payload.friendly_label || 'Workstation',
-                swap_from_hash: payload.swap_from_hash || null,
-                is_swap: isSwap,
-                friendly_label: payload.friendly_label || 'Workstation',
-                reason: payload.reason || 'Self-service device request',
-                hardware_vector: {
-                  cpuid_hash: payload.cpuid,
-                  smbios_hash: payload.smbios,
-                  disk_serial_hash: payload.disk,
-                  machine_guid_hash: payload.guid,
-                },
-                requested_at_utc: new Date().toISOString(),
-                source_issue_number: issueNumber,
-                source_repo: 'manifest',
-              },
+              client_payload: clientPayload,
             });
+            core.info(`Relayed device-onboarding dispatch for @${process.env.TARGET_USER}.`);
 
-            core.info(`Relayed device-onboarding dispatch for @${username} (${deviceId.slice(0, 12)}...).`);
-
-      - name: Ensure Privacy Sanitization and Audit Comment
+      - name: Ensure Privacy Sanitization and Structured Status Marker
         if: always() && steps.capture_and_redact.outputs.is_device_request == 'true'
         uses: actions/github-script@v7
         env:
           JOB_STATUS: ${{ job.status }}
+          REJECT_CODE: ${{ steps.verify_payload.outputs.reject_code }}
           REJECT_REASON: ${{ steps.verify_payload.outputs.reject_reason }}
+          REQUEST_REF: ${{ steps.verify_payload.outputs.request_ref }}
         with:
           script: |
+            const fs = require('fs');
+            const path = require('path');
+            const relayPath = path.resolve('.github/scripts/relay_core.js');
+            const relay = fs.existsSync(relayPath) ? require(relayPath) : null;
+
             const issueNumber = context.payload.issue.number;
             const jobStatus = String(process.env.JOB_STATUS || '');
+            const rejectCode = String(process.env.REJECT_CODE || '').trim() || 'relay_error';
             const rejectReason = String(process.env.REJECT_REASON || '').trim();
+            const requestRef = String(process.env.REQUEST_REF || '').trim() || null;
 
-            try {
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: '🔒 *Contenuto payload hardware rimosso automaticamente dal gateway SevenLab.*',
-                state: 'closed',
-                state_reason: jobStatus === 'success' ? 'completed' : 'not_planned',
-              });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*',
+              state: 'closed',
+              state_reason: jobStatus === 'success' ? 'completed' : 'not_planned',
+            });
 
-              const commentBody = jobStatus === 'success'
-                ? '🔒 **SevenLab Relay (`manifest`)**: Richiesta verificata crittograficamente e inoltrata al backend SevenLab-SideValidation. Issue sanificata e chiusa automaticamente.'
-                : `⚠️ **SevenLab Relay (\`manifest\`)**: Richiesta respinta o non inoltrata.${rejectReason ? ` Motivo: ${rejectReason}` : ''} Il corpo della issue è stato comunque sanificato e chiuso per sicurezza.`;
+            const commentBody = relay
+              ? (jobStatus === 'success'
+                  ? relay.statusMarker('relayed', requestRef, null, '')
+                  : relay.statusMarker('failed', requestRef, rejectCode, rejectReason || 'Errore gateway di inoltro.'))
+              : (jobStatus === 'success'
+                  ? '<!-- sevenlab-accreditation:{"v":1,"phase":"relayed"} -->\n🔒 **SevenLab Relay (`manifest`)**: Richiesta inoltrata.'
+                  : `<!-- sevenlab-accreditation:{"v":1,"phase":"failed","reason_code":"${rejectCode}"} -->\n⚠️ **SevenLab Relay (\`manifest\`)**: Richiesta non inoltrata.`);
 
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: commentBody,
-              });
-            } catch (err) {
-              core.warning(`Sanitization guard warning on issue #${issueNumber}: ${err.message}`);
-            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: commentBody,
+            });
+
+            await github.rest.issues.lock({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              lock_reason: 'resolved',
+            });
