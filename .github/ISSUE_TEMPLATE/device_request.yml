@@ -6,12 +6,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Incolla il payload JSON generato dal client SevenLab (envelope cifrato `v2` oppure payload 4D). La issue verrà automaticamente sanificata e chiusa dal gateway crittografico.
+        Incolla l'envelope JSON cifrato `7LS1` (`v2`) generato dal client SevenLab. La issue verrà automaticamente sanificata e chiusa dal gateway crittografico.
   - type: textarea
     id: payload
     attributes:
       label: Payload Accreditamento (JSON)
-      description: Envelope cifrato v2 (`{"v":2,"sealed":"..."}`) oppure payload 4D con machine_hash e hardware_vector.
+      description: Envelope cifrato v2 (`{"v":2,"sealed":"..."}`) generato dal client SevenLab. I payload plaintext non sono accettati.
       render: json
     validations:
       required: true

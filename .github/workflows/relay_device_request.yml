@@ -5,7 +5,7 @@ on:
     types: [opened]
 
 concurrency:
-  group: relay-device-${{ github.event.issue.number }}
+  group: relay-device-actor-${{ github.actor }}
   cancel-in-progress: false
 
 permissions:
@@ -51,11 +51,20 @@ jobs:
             core.setOutput('issue_number', String(issue.number));
             core.setOutput('issue_title', title);
 
+            const rrMatch = body.match(/"request_ref"\s*:\s*"([A-Za-z0-9_-]{8,64})"/);
+            const initialRef = rrMatch ? rrMatch[1] : null;
+            if (initialRef) {
+              core.setOutput('initial_request_ref', initialRef);
+            }
+            const redactedBody = initialRef
+              ? `<!-- sevenlab-ref:${initialRef} -->\n🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*`
+              : '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*';
+
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue.number,
-              body: '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*',
+              body: redactedBody,
               state: 'closed',
               state_reason: 'completed',
             });
@@ -67,7 +76,6 @@ jobs:
           sparse-checkout: |
             .github/scripts/relay_core.js
             onboarding_allowlist.json
-            version.json
 
       - name: Verify Envelope, Allowlist & Rate Limit
         id: verify_payload
@@ -90,9 +98,10 @@ jobs:
             const issueNumber = Number(process.env.ISSUE_NUMBER || context.payload.issue.number);
 
             const fail = (code, msg) => {
+              const sanitized = relay.stripHex64(msg);
               core.setOutput('reject_code', code);
-              core.setOutput('reject_reason', relay.stripHex64(msg));
-              core.setFailed(msg);
+              core.setOutput('reject_reason', sanitized);
+              core.setFailed(sanitized);
             };
 
             let envelope;
@@ -106,27 +115,26 @@ jobs:
             const allowlistObj = fs.existsSync('onboarding_allowlist.json')
               ? JSON.parse(fs.readFileSync('onboarding_allowlist.json', 'utf8'))
               : null;
-            const versionObj = fs.existsSync('version.json')
-              ? JSON.parse(fs.readFileSync('version.json', 'utf8'))
-              : null;
 
-            const allowRes = relay.checkAllowlist(issueUser, allowlistObj, versionObj);
+            const allowRes = relay.checkAllowlist(issueUser, allowlistObj);
             if (!allowRes.allowed) {
               return fail('not_allowlisted', allowRes.reason);
             }
 
-            const recentIssuesResp = await github.rest.issues.listForRepo({
+            const sinceIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+            const recentIssues = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               creator: issueUser,
               state: 'all',
-              per_page: 20,
+              since: sinceIso,
+              per_page: 100,
               sort: 'created',
               direction: 'desc',
             });
 
             const rl = relay.rateLimitDecision(
-              recentIssuesResp.data,
+              recentIssues,
               Date.now(),
               issueNumber,
               envelope.request_ref
@@ -170,7 +178,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           REJECT_CODE: ${{ steps.verify_payload.outputs.reject_code }}
           REJECT_REASON: ${{ steps.verify_payload.outputs.reject_reason }}
-          REQUEST_REF: ${{ steps.verify_payload.outputs.request_ref }}
+          REQUEST_REF: ${{ steps.verify_payload.outputs.request_ref || steps.capture_and_redact.outputs.initial_request_ref }}
         with:
           script: |
             const fs = require('fs');
@@ -183,12 +191,17 @@ jobs:
             const rejectCode = String(process.env.REJECT_CODE || '').trim() || 'relay_error';
             const rejectReason = String(process.env.REJECT_REASON || '').trim();
             const requestRef = String(process.env.REQUEST_REF || '').trim() || null;
+            const finalRedactedBody = relay
+              ? relay.buildRedactedBody(requestRef)
+              : (requestRef
+                  ? `<!-- sevenlab-ref:${requestRef} -->\n🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*`
+                  : '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*');
 
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issueNumber,
-              body: '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*',
+              body: finalRedactedBody,
               state: 'closed',
               state_reason: jobStatus === 'success' ? 'completed' : 'not_planned',
             });

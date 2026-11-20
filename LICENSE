@@ -2,6 +2,6 @@ SevenLab — Device Authorization Manifest License
 Copyright (c) 2024-2027 Gabriele Ragonesi (SevenLab). All rights reserved.
 
 This repository and all cryptographic authorization artifacts (auth_manifest.bin, auth_manifest.sig,
-and 7LMF v3 structures) are the exclusive intellectual property of Gabriele Ragonesi (SevenLab),
+and 7LMF v4 structures) are the exclusive intellectual property of Gabriele Ragonesi (SevenLab),
 protected pursuant to Law April 22, 1941, n. 633 (art. 12-bis L. 633/1941).
 Unauthorized reproduction, tampering, or redistribution is strictly prohibited.

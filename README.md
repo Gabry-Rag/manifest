@@ -14,8 +14,9 @@ All artifacts are signed by the Device Manifest Authority and verified using the
 
 ## Device Onboarding Relay
 Public self-service workstation accreditation requests (`device-request` issues) are processed by `.github/workflows/relay_device_request.yml` via `.github/scripts/relay_core.js`:
-- **Requirements**: GitHub **Issues** must be enabled on this repository and the repository secret **`SIDE_VALIDATION_RELAY_PAT`** must be configured to dispatch `device_onboarding_request` to `Gabry-Rag/SevenLab-SideValidation` (`repository_dispatch` with `<= 10` top-level `client_payload` keys and nested `meta`).
-- **Privacy & Status Feedback**: Issue bodies are redacted immediately (`[REDACTED BY SEVENLAB RELAY]`) and issues are closed upon processing; SevenLab-SideValidation publishes Zero-Knowledge status comments (`<!-- sevenlab-accreditation:... -->`) via `MANIFEST_REPO_PAT` (`issues:write` + `contents:write`).
+- **Requirements**: GitHub **Issues** must be enabled on this repository and the repository secret **`SIDE_VALIDATION_RELAY_PAT`** must be configured to dispatch `device-onboarding` to `Gabry-Rag/SevenLab-SideValidation` (`repository_dispatch` with `<= 10` top-level `client_payload` keys and nested `meta`).
+- **Privacy & Status Feedback**: Issue bodies are redacted immediately (`🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*`, retaining only a non-sensitive `<!-- sevenlab-ref:... -->` deduplication marker) and issues are closed/locked upon processing; SevenLab-SideValidation publishes Zero-Knowledge status comments (`<!-- sevenlab-accreditation:... -->`) via `MANIFEST_REPO_PAT` (`issues:write` + `contents:write`).
+- **CI Integrity Gate**: `.github/workflows/verify_manifest.yml` runs `npm test` and `npm run verify:manifest` (zero-dep `node:crypto` Ed25519 verification on every published manifest).
 - **Encrypted Envelope (`7LS1`)**: Release clients seal hardware vectors via X25519 + HKDF-SHA256 + ChaCha20-Poly1305 before opening an issue so plaintext hardware fingerprints never appear publicly.
 
 ## License & Intellectual Property

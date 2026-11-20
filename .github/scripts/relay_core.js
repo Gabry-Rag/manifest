@@ -3,12 +3,10 @@
 const crypto = require('crypto');
 
 const SEALED_MAGIC = Buffer.from('7LS1', 'ascii');
-const HEX64_RE = /^[a-f0-9]{64}$/;
-const ASCII_LABEL_RE = /^[A-Za-z0-9_. -]{1,64}$/;
 const REQUEST_REF_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const USER_IDENTITY_DOMAIN = 'SevenLab-User-Identity-v1:';
-const HARDWARE_COMPOSITE_DOMAIN = 'SevenLab-HardwareVector4-Composite\0';
 const MAX_CLIENT_PAYLOAD_KEYS = 10;
+const REDACTED_BODY_TEXT = '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*';
 
 function stripHex64(text) {
   return String(text || '').replace(/[a-f0-9]{64}/gi, '[redacted]');
@@ -26,6 +24,8 @@ function classifyIssue(issue) {
     title.startsWith('[Device Onboarding]') ||
     title.startsWith('[Device Swap]');
 
+  // Keep legacy plaintext markers intentionally so any accidental plaintext leak
+  // still triggers immediate body redaction, issue closing, locking, and rejection.
   const hasEnvelopeMarker =
     body.includes('"sealed"') ||
     body.includes('"hardware_vector"') ||
@@ -42,6 +42,32 @@ function extractJsonBody(rawBody) {
   return JSON.parse(rawToParse.trim());
 }
 
+function extractRequestRef(rawBody) {
+  try {
+    const parsed = extractJsonBody(rawBody);
+    if (parsed && typeof parsed === 'object' && parsed.request_ref) {
+      const rr = String(parsed.request_ref).trim();
+      if (REQUEST_REF_RE.test(rr)) {
+        return rr;
+      }
+    }
+  } catch {
+    const match = String(rawBody || '').match(/"request_ref"\s*:\s*"([A-Za-z0-9_-]{8,64})"/);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function buildRedactedBody(requestRef) {
+  const rr = requestRef ? String(requestRef).trim() : '';
+  if (rr && REQUEST_REF_RE.test(rr)) {
+    return `<!-- sevenlab-ref:${rr} -->\n${REDACTED_BODY_TEXT}`;
+  }
+  return REDACTED_BODY_TEXT;
+}
+
 function computeUserIdentityHash(username) {
   const clean = String(username || '').trim().toLowerCase().replace(/^@+/, '');
   return crypto
@@ -51,24 +77,7 @@ function computeUserIdentityHash(username) {
     .toLowerCase();
 }
 
-function computeCompositeHash(cpuid, smbios, disk, guid) {
-  return crypto
-    .createHash('sha256')
-    .update(HARDWARE_COMPOSITE_DOMAIN, 'utf8')
-    .update(Buffer.from(`${cpuid}${smbios}${disk}${guid}`, 'hex'))
-    .digest('hex')
-    .toLowerCase();
-}
-
-function normalizeLabel(rawLabel) {
-  const cleaned = String(rawLabel || 'Workstation').replace(/[\r\n\t]+/g, ' ').trim() || 'Workstation';
-  if (!ASCII_LABEL_RE.test(cleaned)) {
-    throw new Error('Etichetta postazione non valida (ammessi 1-64 caratteri ASCII: lettere, numeri, spazio, ., _, -).');
-  }
-  return cleaned;
-}
-
-function validateAndParseEnvelope(rawBody, issueUser, issueTitle) {
+function validateAndParseEnvelope(rawBody, issueUser, _issueTitle) {
   const cleanAuthor = String(issueUser || '').trim().replace(/^@+/, '');
   if (!cleanAuthor || !/^[a-zA-Z0-9_.-]{1,64}$/.test(cleanAuthor)) {
     throw new Error('Autore GitHub non valido.');
@@ -95,121 +104,54 @@ function validateAndParseEnvelope(rawBody, issueUser, issueTitle) {
     requestRef = rr;
   }
 
-  // Preferred v2 sealed envelope: {"v": 2, "sealed": "<base64>", "request_ref": "...", "username": "..."}
-  if (typeof parsed.sealed === 'string' && parsed.sealed.trim().length > 0) {
-    const version = parsed.v === undefined ? 2 : Number(parsed.v);
-    if (version !== 2) {
-      throw new Error(`Versione envelope sealed non supportata: ${parsed.v}`);
-    }
-    const sealedB64 = parsed.sealed.trim();
-    if (sealedB64.length > 8192 || !/^[A-Za-z0-9+/=]+$/.test(sealedB64)) {
-      throw new Error('Formato Base64 envelope sealed non valido.');
-    }
-    const rawBuf = Buffer.from(sealedB64, 'base64');
-    // 4B magic ("7LS1") + 32B ephemeral pubkey + 16B Poly1305 tag + >= 16B ciphertext
-    if (rawBuf.length < 4 + 32 + 16 + 16 || rawBuf.length > 4096 + 64) {
-      throw new Error('Dimensione envelope sealed fuori intervallo.');
-    }
-    if (!rawBuf.subarray(0, 4).equals(SEALED_MAGIC)) {
-      throw new Error('Magic header envelope sealed non valido (atteso 7LS1).');
-    }
-
-    return {
-      mode: 'sealed_v2',
-      username: cleanAuthor,
-      sealed: sealedB64,
-      request_ref: requestRef,
-    };
+  // Strict v2 sealed envelope: {"v": 2, "sealed": "<base64>", "request_ref": "...", "username": "..."}
+  if (typeof parsed.sealed !== 'string' || parsed.sealed.trim().length === 0) {
+    throw new Error('Envelope cifrato 7LS1 obbligatorio; payload plaintext v1 non supportato.');
   }
 
-  // Plaintext v1 fallback (legacy or manual ISSUE_TEMPLATE)
-  const deviceId = String(parsed.device_id || parsed.machine_hash || '').trim().toLowerCase();
-  const hw = parsed.hardware_vector || {};
-  const cpuid = String(parsed.cpuid || hw.cpuid_hash || '').trim().toLowerCase();
-  const smbios = String(parsed.smbios || hw.smbios_hash || '').trim().toLowerCase();
-  const disk = String(parsed.disk || hw.disk_serial_hash || '').trim().toLowerCase();
-  const guid = String(parsed.guid || hw.machine_guid_hash || hw.os_guid_hash || '').trim().toLowerCase();
-
-  if (!HEX64_RE.test(deviceId)) {
-    throw new Error('machine_hash/device_id non valido (attesi 64 caratteri hex).');
+  const version = parsed.v === undefined ? 2 : Number(parsed.v);
+  if (version !== 2) {
+    throw new Error(`Versione envelope sealed non supportata: ${parsed.v}`);
   }
-  for (const [k, v] of [['cpuid', cpuid], ['smbios', smbios], ['disk', disk], ['guid', guid]]) {
-    if (!HEX64_RE.test(v)) {
-      throw new Error(`Sub-vettore '${k}' non valido (attesi 64 caratteri hex).`);
-    }
+  const sealedB64 = parsed.sealed.trim();
+  if (sealedB64.length > 8192 || !/^[A-Za-z0-9+/=]+$/.test(sealedB64)) {
+    throw new Error('Formato Base64 envelope sealed non valido.');
   }
-
-  const expectedComposite = computeCompositeHash(cpuid, smbios, disk, guid);
-  if (expectedComposite !== deviceId) {
-    throw new Error('Composite SHA-256 mismatch tra machine_hash e vettore hardware 4D.');
+  const rawBuf = Buffer.from(sealedB64, 'base64');
+  // 4B magic ("7LS1") + 32B ephemeral pubkey + 16B Poly1305 tag + >= 16B ciphertext
+  if (rawBuf.length < 4 + 32 + 16 + 16 || rawBuf.length > 4096 + 64) {
+    throw new Error('Dimensione envelope sealed fuori intervallo.');
   }
-
-  const swapFromRaw = parsed.swap_from_hash || parsed.old_machine_hash || null;
-  const swapFrom = swapFromRaw ? String(swapFromRaw).trim().toLowerCase() : null;
-  if (swapFrom && !HEX64_RE.test(swapFrom)) {
-    throw new Error('swap_from_hash non valido (attesi 64 caratteri hex).');
+  if (!rawBuf.subarray(0, 4).equals(SEALED_MAGIC)) {
+    throw new Error('Magic header envelope sealed non valido (atteso 7LS1).');
   }
-
-  const friendlyLabel = normalizeLabel(parsed.friendly_label || parsed.label || 'Workstation');
-  const titleStr = String(issueTitle || '');
-  const isSwap = Boolean(parsed.is_swap || parsed.action === 'swap' || swapFrom || titleStr.startsWith('[Device Swap]'));
-  const reason = String(parsed.reason || 'Self-service device request').replace(/[\r\n]+/g, ' ').slice(0, 200);
 
   return {
-    mode: 'plaintext_v1',
+    mode: 'sealed_v2',
     username: cleanAuthor,
-    machine_hash: deviceId,
-    cpuid,
-    smbios,
-    disk,
-    guid,
-    friendly_label: friendlyLabel,
-    swap_from_hash: swapFrom,
-    is_swap: isSwap,
-    reason,
+    sealed: sealedB64,
     request_ref: requestRef,
   };
 }
 
 function buildDispatchPayload(envelope, issueNumber, nowIso) {
-  const requestedAt = nowIso || new Date().toISOString();
-  let clientPayload;
-
-  if (envelope.mode === 'sealed_v2') {
-    clientPayload = {
-      v: 2,
-      username: envelope.username,
-      sealed: envelope.sealed,
-      request_ref: envelope.request_ref || null,
-      source_repo: 'manifest',
-      meta: {
-        issue_number: Number(issueNumber),
-        request_ref: envelope.request_ref || null,
-        requested_at_utc: requestedAt,
-        source_repo: 'manifest',
-      },
-    };
-  } else {
-    clientPayload = {
-      username: envelope.username,
-      machine_hash: envelope.machine_hash,
-      cpuid: envelope.cpuid,
-      smbios: envelope.smbios,
-      disk: envelope.disk,
-      guid: envelope.guid,
-      label: envelope.friendly_label,
-      swap_from_hash: envelope.swap_from_hash || null,
-      source_repo: 'manifest',
-      meta: {
-        issue_number: Number(issueNumber),
-        request_ref: envelope.request_ref || null,
-        requested_at_utc: requestedAt,
-        is_swap: Boolean(envelope.is_swap),
-        reason: envelope.reason || 'Self-service device request',
-        friendly_label: envelope.friendly_label,
-      },
-    };
+  if (!envelope || envelope.mode !== 'sealed_v2') {
+    throw new Error('Envelope cifrato 7LS1 obbligatorio per il dispatch.');
   }
+  const requestedAt = nowIso || new Date().toISOString();
+  const clientPayload = {
+    v: 2,
+    username: envelope.username,
+    sealed: envelope.sealed,
+    request_ref: envelope.request_ref || null,
+    source_repo: 'manifest',
+    meta: {
+      issue_number: Number(issueNumber),
+      request_ref: envelope.request_ref || null,
+      requested_at_utc: requestedAt,
+      source_repo: 'manifest',
+    },
+  };
 
   const keyCount = Object.keys(clientPayload).length;
   if (keyCount > MAX_CLIENT_PAYLOAD_KEYS) {
@@ -218,7 +160,7 @@ function buildDispatchPayload(envelope, issueNumber, nowIso) {
   return clientPayload;
 }
 
-function checkAllowlist(issueUser, allowlistObj, versionMetaObj) {
+function checkAllowlist(issueUser, allowlistObj) {
   const cleanUser = String(issueUser || '').trim().toLowerCase().replace(/^@+/, '');
   if (!cleanUser) {
     return { allowed: false, reason: 'Identità GitHub mancante.' };
@@ -227,23 +169,20 @@ function checkAllowlist(issueUser, allowlistObj, versionMetaObj) {
     return { allowed: true, reason: 'platform_owner' };
   }
 
-  const source = allowlistObj && typeof allowlistObj === 'object' ? allowlistObj : versionMetaObj;
-  if (!source || typeof source !== 'object') {
+  if (!allowlistObj || typeof allowlistObj !== 'object') {
     return {
       allowed: false,
       reason: 'Allowlist di onboarding assente (fail-closed): contatta l\'amministratore.',
     };
   }
 
-  if (source.allow_unknown_user_onboarding === true) {
+  if (allowlistObj.allow_unknown_user_onboarding === true) {
     return { allowed: true, reason: 'allow_unknown_enabled' };
   }
 
-  const hashes = Array.isArray(source.allowed_user_hashes)
-    ? source.allowed_user_hashes
-    : Array.isArray(source.onboarding_allowed_user_hashes)
-      ? source.onboarding_allowed_user_hashes
-      : null;
+  const hashes = Array.isArray(allowlistObj.allowed_user_hashes)
+    ? allowlistObj.allowed_user_hashes
+    : null;
 
   if (!Array.isArray(hashes)) {
     return {
@@ -268,6 +207,7 @@ function rateLimitDecision(recentIssues, nowMs, currentIssueNumber, requestRef, 
   const cutoff = (typeof nowMs === 'number' ? nowMs : Date.now()) - 24 * 3600 * 1000;
   const list = Array.isArray(recentIssues) ? recentIssues : [];
   let recentCount = 0;
+  const marker = requestRef ? `<!-- sevenlab-ref:${requestRef} -->` : null;
 
   for (const item of list) {
     if (!item || Number(item.number) === Number(currentIssueNumber)) continue;
@@ -277,7 +217,8 @@ function rateLimitDecision(recentIssues, nowMs, currentIssueNumber, requestRef, 
         recentCount += 1;
       }
     }
-    if (requestRef && typeof item.body === 'string' && item.body.includes(requestRef)) {
+    const itemBody = typeof item.body === 'string' ? item.body : '';
+    if (requestRef && ((marker && itemBody.includes(marker)) || itemBody.includes(requestRef))) {
       return {
         allowed: false,
         duplicate: true,
@@ -333,11 +274,12 @@ function statusMarker(phase, requestRef, reasonCode, message) {
 
 module.exports = {
   MAX_CLIENT_PAYLOAD_KEYS,
+  REDACTED_BODY_TEXT,
   classifyIssue,
   extractJsonBody,
+  extractRequestRef,
+  buildRedactedBody,
   computeUserIdentityHash,
-  computeCompositeHash,
-  normalizeLabel,
   validateAndParseEnvelope,
   buildDispatchPayload,
   checkAllowlist,

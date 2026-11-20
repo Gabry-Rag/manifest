@@ -5,8 +5,9 @@ const assert = require('node:assert/strict');
 const {
   MAX_CLIENT_PAYLOAD_KEYS,
   classifyIssue,
+  extractRequestRef,
+  buildRedactedBody,
   computeUserIdentityHash,
-  computeCompositeHash,
   validateAndParseEnvelope,
   buildDispatchPayload,
   checkAllowlist,
@@ -14,13 +15,12 @@ const {
   statusMarker,
 } = require('./relay_core');
 
-const CPUID = '11'.repeat(32);
-const SMBIOS = '22'.repeat(32);
-const DISK = '33'.repeat(32);
-const GUID = '44'.repeat(32);
-const COMP = computeCompositeHash(CPUID, SMBIOS, DISK, GUID);
+const DUMMY_HEX64_A = '11'.repeat(32);
+const DUMMY_HEX64_B = '22'.repeat(32);
+const DUMMY_HEX64_C = '33'.repeat(32);
+const DUMMY_HEX64_D = '44'.repeat(32);
 
-test('classifyIssue identifies request without labels (non-collaborator author)', () => {
+test('classifyIssue identifies request without labels and intercepts legacy plaintext leak markers', () => {
   assert.equal(
     classifyIssue({
       title: '[Device Request] Registration for @gabrieleSEVEN',
@@ -29,6 +29,16 @@ test('classifyIssue identifies request without labels (non-collaborator author)'
     }),
     true
   );
+  for (const legacyKey of ['"hardware_vector"', '"machine_hash"', '"cpuid"']) {
+    assert.equal(
+      classifyIssue({
+        title: 'Random title',
+        body: `{${legacyKey}: "leak"}`,
+        labels: [],
+      }),
+      true
+    );
+  }
   assert.equal(
     classifyIssue({
       title: 'General bug report',
@@ -53,6 +63,7 @@ test('validateAndParseEnvelope accepts sealed v2 envelope and enforces <=10 keys
   );
   assert.equal(env.mode, 'sealed_v2');
   assert.equal(env.username, 'gabrieleSEVEN');
+  assert.equal(env.request_ref, 'req-12345678');
 
   const payload = buildDispatchPayload(env, 42, '2026-11-18T05:00:00Z');
   assert.ok(Object.keys(payload).length <= MAX_CLIENT_PAYLOAD_KEYS);
@@ -78,70 +89,39 @@ test('validateAndParseEnvelope rejects identity spoofing even on sealed envelope
   );
 });
 
-test('validateAndParseEnvelope accepts plaintext v1 and buildDispatchPayload stays <=10 keys', () => {
+test('validateAndParseEnvelope strictly rejects plaintext v1 payloads', () => {
   const body = '```json\n' + JSON.stringify({
     username: 'gabrieleSEVEN',
-    machine_hash: COMP,
+    machine_hash: DUMMY_HEX64_A,
     friendly_label: 'GR-Sev_Workstation',
     request_ref: 'req-abcdef12',
     hardware_vector: {
-      cpuid_hash: CPUID,
-      smbios_hash: SMBIOS,
-      disk_serial_hash: DISK,
-      machine_guid_hash: GUID,
+      cpuid_hash: DUMMY_HEX64_A,
+      smbios_hash: DUMMY_HEX64_B,
+      disk_serial_hash: DUMMY_HEX64_C,
+      machine_guid_hash: DUMMY_HEX64_D,
     },
   }) + '\n```';
 
-  const env = validateAndParseEnvelope(body, 'gabrieleSEVEN', '[Device Request] Registration');
-  assert.equal(env.mode, 'plaintext_v1');
-  const payload = buildDispatchPayload(env, 99, '2026-11-18T05:00:00Z');
-  assert.ok(Object.keys(payload).length <= MAX_CLIENT_PAYLOAD_KEYS);
-  assert.equal(payload.meta.issue_number, 99);
-  assert.equal(payload.label, 'GR-Sev_Workstation');
-});
-
-test('validateAndParseEnvelope rejects composite mismatch and non-ASCII label', () => {
   assert.throws(
-    () =>
-      validateAndParseEnvelope(
-        JSON.stringify({
-          machine_hash: 'ff'.repeat(32),
-          hardware_vector: { cpuid_hash: CPUID, smbios_hash: SMBIOS, disk_serial_hash: DISK, machine_guid_hash: GUID },
-        }),
-        'gabrieleSEVEN',
-        '[Device Request]'
-      ),
-    /Composite SHA-256 mismatch/
-  );
-
-  assert.throws(
-    () =>
-      validateAndParseEnvelope(
-        JSON.stringify({
-          machine_hash: COMP,
-          friendly_label: 'Postazione Città',
-          hardware_vector: { cpuid_hash: CPUID, smbios_hash: SMBIOS, disk_serial_hash: DISK, machine_guid_hash: GUID },
-        }),
-        'gabrieleSEVEN',
-        '[Device Request]'
-      ),
-    /Etichetta postazione non valida/
+    () => validateAndParseEnvelope(body, 'gabrieleSEVEN', '[Device Request] Registration'),
+    /Envelope cifrato 7LS1 obbligatorio/
   );
 });
 
 test('checkAllowlist enforces fail-closed when missing, allows owner and listed hash', () => {
-  assert.equal(checkAllowlist('gabry-rag', null, null).allowed, true);
-  assert.equal(checkAllowlist('gabrieleSEVEN', null, null).allowed, false);
+  assert.equal(checkAllowlist('gabry-rag', null).allowed, true);
+  assert.equal(checkAllowlist('gabrieleSEVEN', null).allowed, false);
 
   const allowlist = {
     allow_unknown_user_onboarding: false,
     allowed_user_hashes: [computeUserIdentityHash('gabrieleseven')],
   };
-  assert.equal(checkAllowlist('gabrieleSEVEN', allowlist, null).allowed, true);
-  assert.equal(checkAllowlist('stranger', allowlist, null).allowed, false);
+  assert.equal(checkAllowlist('gabrieleSEVEN', allowlist).allowed, true);
+  assert.equal(checkAllowlist('stranger', allowlist).allowed, false);
 });
 
-test('rateLimitDecision enforces max 3 per 24h and detects duplicate request_ref', () => {
+test('rateLimitDecision enforces max 3 per 24h and detects duplicate request_ref in redacted issues', () => {
   const now = Date.parse('2026-11-18T12:00:00Z');
   const issues = [
     { number: 1, title: '[Device Request] A', created_at: '2026-11-18T10:00:00Z', body: 'x' },
@@ -149,15 +129,23 @@ test('rateLimitDecision enforces max 3 per 24h and detects duplicate request_ref
     { number: 3, title: '[Device Request] C', created_at: '2026-11-18T11:30:00Z', body: 'z' },
   ];
   assert.equal(rateLimitDecision(issues, now, 4, 'req-new-1234', 3).allowed, false);
-  assert.equal(
-    rateLimitDecision([{ number: 1, title: '[Device Request] A', created_at: '2026-11-18T10:00:00Z', body: 'req-dup-1234' }], now, 2, 'req-dup-1234', 3).duplicate,
-    true
+
+  const redacted = buildRedactedBody('req-dup-1234');
+  const rlDup = rateLimitDecision(
+    [{ number: 1, title: '[Device Request] A', created_at: '2026-11-18T10:00:00Z', body: redacted }],
+    now,
+    2,
+    'req-dup-1234',
+    3
   );
+  assert.equal(rlDup.duplicate, true);
+  assert.equal(rlDup.allowed, false);
+  assert.equal(extractRequestRef(JSON.stringify({ request_ref: 'req-dup-1234' })), 'req-dup-1234');
 });
 
 test('statusMarker omits 64-hex hashes and emits machine-readable comment', () => {
-  const msg = statusMarker('failed', 'req-12345678', 'invalid_vector', `Bad hash ${COMP}`);
+  const msg = statusMarker('failed', 'req-12345678', 'invalid_vector', `Bad hash ${DUMMY_HEX64_A}`);
   assert.ok(msg.startsWith('<!-- sevenlab-accreditation:'));
-  assert.ok(!msg.includes(COMP));
+  assert.ok(!msg.includes(DUMMY_HEX64_A));
   assert.ok(msg.includes('[redacted]'));
 });

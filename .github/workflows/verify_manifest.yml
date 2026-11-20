@@ -1,0 +1,46 @@
+name: Verify Signed Manifest & Relay Tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'auth_manifest.bin'
+      - 'auth_manifest.sig'
+      - 'version.json'
+      - 'onboarding_allowlist.json'
+      - 'package.json'
+      - '.github/scripts/**'
+      - '.github/workflows/verify_manifest.yml'
+  pull_request:
+    paths:
+      - 'auth_manifest.bin'
+      - 'auth_manifest.sig'
+      - 'version.json'
+      - 'onboarding_allowlist.json'
+      - 'package.json'
+      - '.github/scripts/**'
+      - '.github/workflows/verify_manifest.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Relay Unit Tests & 7LMF v4 Ed25519 Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout manifest repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run Relay Unit Tests
+        run: npm test
+
+      - name: Verify Signed 7LMF v4 Manifest & Digests
+        run: npm run verify:manifest
