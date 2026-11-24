@@ -12,6 +12,8 @@ on:
       - 'package.json'
       - '.github/scripts/**'
       - '.github/workflows/verify_manifest.yml'
+      - '.github/workflows/relay_device_request.yml'
+      - '.github/ISSUE_TEMPLATE/**'
   pull_request:
     paths:
       - 'auth_manifest.bin'
@@ -21,6 +23,8 @@ on:
       - 'package.json'
       - '.github/scripts/**'
       - '.github/workflows/verify_manifest.yml'
+      - '.github/workflows/relay_device_request.yml'
+      - '.github/ISSUE_TEMPLATE/**'
   workflow_dispatch:
 
 permissions:
@@ -28,19 +32,19 @@ permissions:
 
 jobs:
   verify:
-    name: Relay Unit Tests & 7LMF v4 Ed25519 Verification
+    name: Relay Unit Tests & 7LMF v4/v5 Ed25519 Verification
     runs-on: ubuntu-latest
     steps:
       - name: Checkout manifest repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
 
       - name: Run Relay Unit Tests
         run: npm test
 
-      - name: Verify Signed 7LMF v4 Manifest & Digests
+      - name: Verify Signed 7LMF Manifest & Digests
         run: npm run verify:manifest
