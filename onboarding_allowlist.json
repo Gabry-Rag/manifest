@@ -1,7 +1,7 @@
 {
   "version": 1,
   "hash_scheme": "sha256-v1",
-  "generated_at_utc": "2026-11-24T03:15:13+00:00",
+  "generated_at_utc": "2026-11-24T05:09:01+00:00",
   "allow_unknown_user_onboarding": false,
   "allowed_user_hashes": [
     "6adba5c1972813258d319c4240602bfe991e8e974aacd6b1fb1c49795a3c73b8",
