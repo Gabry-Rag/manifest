@@ -4,10 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   MAX_CLIENT_PAYLOAD_KEYS,
+  REDACTED_BODY_TEXT,
   classifyIssue,
   extractRequestRef,
   buildRedactedBody,
   computeUserIdentityHash,
+  computeUserIdentityHmac,
   validateAndParseEnvelope,
   buildDispatchPayload,
   checkAllowlist,
@@ -143,9 +145,77 @@ test('rateLimitDecision enforces max 3 per 24h and detects duplicate request_ref
   assert.equal(extractRequestRef(JSON.stringify({ request_ref: 'req-dup-1234' })), 'req-dup-1234');
 });
 
-test('statusMarker omits 64-hex hashes and emits machine-readable comment', () => {
-  const msg = statusMarker('failed', 'req-12345678', 'invalid_vector', `Bad hash ${DUMMY_HEX64_A}`);
+test('statusMarker omits 64-hex hashes and neutralizes HTML comment breakout attempts', () => {
+  const msg = statusMarker('failed', 'req-12345678', 'invalid-->vector', `Bad hash ${DUMMY_HEX64_A} --> <!-- injected`);
   assert.ok(msg.startsWith('<!-- sevenlab-accreditation:'));
   assert.ok(!msg.includes(DUMMY_HEX64_A));
   assert.ok(msg.includes('[redacted]'));
+  const closeIdx = msg.indexOf(' -->\n');
+  assert.ok(closeIdx > 0);
+  const insideComment = msg.slice('<!-- sevenlab-accreditation:'.length, closeIdx);
+  assert.ok(!insideComment.includes('-->'));
+});
+
+test('classifyIssue identifies already-redacted issues and labels without title prefix', () => {
+  assert.equal(
+    classifyIssue({
+      title: 'Opaque Title',
+      body: REDACTED_BODY_TEXT,
+      labels: [],
+    }),
+    true
+  );
+  assert.equal(
+    classifyIssue({
+      title: 'Opaque Title',
+      body: 'some body',
+      labels: [{ name: 'device-request' }],
+    }),
+    true
+  );
+});
+
+test('rateLimitDecision ignores pull requests and avoids request_ref substring collision', () => {
+  const now = Date.parse('2026-11-18T12:00:00Z');
+  const prItem = { number: 1, title: '[Device Request] PR', created_at: '2026-11-18T10:00:00Z', body: '<!-- sevenlab-ref:req-dup-1234 -->', pull_request: {} };
+  const longerRefRedacted = buildRedactedBody('req-dup-12345678');
+  const longerIssue = { number: 2, title: '[Device Request] Long', created_at: '2026-11-18T11:00:00Z', body: longerRefRedacted };
+
+  const res = rateLimitDecision([prItem, longerIssue], now, 3, 'req-dup-1234', 3);
+  assert.equal(res.allowed, true);
+  assert.equal(res.duplicate, false);
+  assert.equal(res.recentCount, 1);
+});
+
+test('checkAllowlist enforces HMAC-SHA256 v2 schema and fails closed on missing key or v1 downgrade', () => {
+  const hmacKey = 'test-hmac-secret-key-2026';
+  const v2Allowlist = {
+    version: 2,
+    hash_scheme: 'hmac-sha256-v1',
+    allow_unknown_user_onboarding: false,
+    allowed_user_hashes: [computeUserIdentityHmac('gabrieleseven', hmacKey)],
+  };
+  assert.equal(checkAllowlist('gabrieleSEVEN', v2Allowlist, hmacKey).allowed, true);
+  assert.equal(checkAllowlist('gabrieleSEVEN', v2Allowlist, '').allowed, false);
+  assert.equal(checkAllowlist('attacker', v2Allowlist, hmacKey).allowed, false);
+
+  const v1Allowlist = {
+    version: 1,
+    allow_unknown_user_onboarding: false,
+    allowed_user_hashes: [computeUserIdentityHash('gabrieleseven')],
+  };
+  assert.equal(checkAllowlist('gabrieleSEVEN', v1Allowlist, hmacKey).allowed, false);
+});
+
+test('validateAndParseEnvelope rejects unsupported version without echoing untrusted input', () => {
+  const fakeCipher = Buffer.concat([
+    Buffer.from('7LS1', 'ascii'),
+    Buffer.alloc(32, 0xaa),
+    Buffer.alloc(32, 0xbb),
+  ]).toString('base64');
+
+  assert.throws(
+    () => validateAndParseEnvelope(JSON.stringify({ v: '999-attacker-tag', sealed: fakeCipher }), 'gabrieleSEVEN', '[Device Request]'),
+    (err) => !String(err.message).includes('attacker-tag')
+  );
 });

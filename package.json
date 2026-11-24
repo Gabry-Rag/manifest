@@ -4,7 +4,7 @@
   "private": true,
   "description": "SevenLab Device Authorization Manifest & Relay Tooling",
   "scripts": {
-    "test": "node --test .github/scripts/relay_core.test.js",
+    "test": "node --test .github/scripts/relay_core.test.js .github/scripts/verify_manifest.test.js",
     "verify:manifest": "node .github/scripts/verify_manifest.js"
   }
 }

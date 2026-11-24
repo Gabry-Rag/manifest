@@ -13,20 +13,35 @@ permissions:
   contents: read
 
 jobs:
-  relay:
-    name: Capture, Sanitize, Verify & Relay Device Request
+  parse_and_verify:
+    name: Capture, Redact, Allowlist & Rate-Limit Verification
+    if: ${{ !github.event.issue.pull_request }}
     runs-on: ubuntu-latest
+    outputs:
+      is_device_request: ${{ steps.capture_and_redact.outputs.is_device_request }}
+      issue_number: ${{ steps.capture_and_redact.outputs.issue_number }}
+      issue_user: ${{ steps.capture_and_redact.outputs.issue_user }}
+      validated: ${{ steps.verify_payload.outputs.validated }}
+      request_ref: ${{ steps.verify_payload.outputs.request_ref }}
+      dispatch_payload_json: ${{ steps.verify_payload.outputs.dispatch_payload_json }}
+      reject_code: ${{ steps.verify_payload.outputs.reject_code }}
+      reject_reason: ${{ steps.verify_payload.outputs.reject_reason }}
 
     steps:
-      - name: Capture Payload, Redact Body and Close Issue Immediately
+      - name: Capture Payload, Redact Body, Label & Close Issue Immediately
         id: capture_and_redact
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const issue = context.payload.issue;
+            if (!issue || issue.pull_request) {
+              core.setOutput('is_device_request', 'false');
+              return;
+            }
             const title = String(issue.title || '');
             const body = String(issue.body || '');
-            const labels = (issue.labels || []).map((l) => String(l.name || '').toLowerCase());
+            const existingLabels = (issue.labels || []).map((l) => String(l.name || ''));
+            const lowerLabels = existingLabels.map((l) => l.toLowerCase());
 
             const isDeviceTitle =
               title.startsWith('[Device Request]') ||
@@ -38,7 +53,7 @@ jobs:
               body.includes('"machine_hash"') ||
               body.includes('"cpuid"');
 
-            const isDeviceRequest = isDeviceTitle || labels.includes('device-request') || hasEnvelopeJson;
+            const isDeviceRequest = isDeviceTitle || lowerLabels.includes('device-request') || hasEnvelopeJson;
             if (!isDeviceRequest) {
               core.info(`Issue #${issue.number} does not match device request criteria; ignoring.`);
               core.setOutput('is_device_request', 'false');
@@ -47,45 +62,39 @@ jobs:
 
             core.setOutput('is_device_request', 'true');
             core.setOutput('raw_body', body);
-            core.setOutput('issue_user', String(issue.user.login || ''));
+            core.setOutput('issue_user', String((issue.user && issue.user.login) || ''));
             core.setOutput('issue_number', String(issue.number));
             core.setOutput('issue_title', title);
 
-            const rrMatch = body.match(/"request_ref"\s*:\s*"([A-Za-z0-9_-]{8,64})"/);
-            const initialRef = rrMatch ? rrMatch[1] : null;
-            if (initialRef) {
-              core.setOutput('initial_request_ref', initialRef);
-            }
-            const redactedBody = initialRef
-              ? `<!-- sevenlab-ref:${initialRef} -->\n🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*`
-              : '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*';
-
+            const mergedLabels = Array.from(new Set([...existingLabels.filter(Boolean), 'device-request']));
             await github.rest.issues.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue.number,
-              body: redactedBody,
+              body: '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*',
+              labels: mergedLabels,
               state: 'closed',
               state_reason: 'completed',
             });
 
       - name: Checkout Relay Tooling and Allowlist Snapshot
         if: steps.capture_and_redact.outputs.is_device_request == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           sparse-checkout: |
             .github/scripts/relay_core.js
             onboarding_allowlist.json
 
-      - name: Verify Envelope, Allowlist & Rate Limit
+      - name: Early Allowlist, Rate-Limit & Sealed 7LS1 Verification
         id: verify_payload
         if: steps.capture_and_redact.outputs.is_device_request == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           RAW_BODY: ${{ steps.capture_and_redact.outputs.raw_body }}
           ISSUE_USER: ${{ steps.capture_and_redact.outputs.issue_user }}
           ISSUE_TITLE: ${{ steps.capture_and_redact.outputs.issue_title }}
           ISSUE_NUMBER: ${{ steps.capture_and_redact.outputs.issue_number }}
+          ALLOWLIST_HMAC_KEY: ${{ secrets.ALLOWLIST_HMAC_KEY }}
         with:
           script: |
             const fs = require('fs');
@@ -96,13 +105,24 @@ jobs:
             const rawBody = String(process.env.RAW_BODY || '');
             const issueTitle = String(process.env.ISSUE_TITLE || '');
             const issueNumber = Number(process.env.ISSUE_NUMBER || context.payload.issue.number);
+            const hmacKey = String(process.env.ALLOWLIST_HMAC_KEY || '');
 
             const fail = (code, msg) => {
               const sanitized = relay.stripHex64(msg);
+              core.setOutput('validated', 'false');
               core.setOutput('reject_code', code);
               core.setOutput('reject_reason', sanitized);
               core.setFailed(sanitized);
             };
+
+            const allowlistObj = fs.existsSync('onboarding_allowlist.json')
+              ? JSON.parse(fs.readFileSync('onboarding_allowlist.json', 'utf8'))
+              : null;
+
+            const allowRes = relay.checkAllowlist(issueUser, allowlistObj, hmacKey);
+            if (!allowRes.allowed) {
+              return fail('not_allowlisted', allowRes.reason);
+            }
 
             let envelope;
             try {
@@ -110,15 +130,6 @@ jobs:
               core.setOutput('request_ref', envelope.request_ref || '');
             } catch (err) {
               return fail('invalid_envelope', err.message);
-            }
-
-            const allowlistObj = fs.existsSync('onboarding_allowlist.json')
-              ? JSON.parse(fs.readFileSync('onboarding_allowlist.json', 'utf8'))
-              : null;
-
-            const allowRes = relay.checkAllowlist(issueUser, allowlistObj);
-            if (!allowRes.allowed) {
-              return fail('not_allowlisted', allowRes.reason);
             }
 
             const sinceIso = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
@@ -147,18 +158,36 @@ jobs:
             core.setOutput('dispatch_payload_json', JSON.stringify(dispatchPayload));
             core.setOutput('validated', 'true');
 
+  dispatch_and_finalize:
+    name: Dispatch Sealed Onboarding & Finalize Issue Markers
+    needs: parse_and_verify
+    if: ${{ always() && !github.event.issue.pull_request && needs.parse_and_verify.outputs.is_device_request == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+
+    steps:
+      - name: Checkout Relay Marker Helpers
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          sparse-checkout: |
+            .github/scripts/relay_core.js
+
       - name: Dispatch Verified Request to SevenLab-SideValidation
-        if: steps.verify_payload.outputs.validated == 'true'
-        uses: actions/github-script@v7
+        id: dispatch_request
+        if: needs.parse_and_verify.outputs.validated == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           RELAY_PAT: ${{ secrets.SIDE_VALIDATION_RELAY_PAT }}
-          DISPATCH_PAYLOAD_JSON: ${{ steps.verify_payload.outputs.dispatch_payload_json }}
-          TARGET_USER: ${{ steps.capture_and_redact.outputs.issue_user }}
+          DISPATCH_PAYLOAD_JSON: ${{ needs.parse_and_verify.outputs.dispatch_payload_json }}
+          TARGET_USER: ${{ needs.parse_and_verify.outputs.issue_user }}
         with:
           github-token: ${{ env.RELAY_PAT }}
           script: |
             const relayPat = process.env.RELAY_PAT;
             if (!relayPat) {
+              core.setOutput('dispatched', 'false');
               core.setFailed('Missing secret SIDE_VALIDATION_RELAY_PAT in manifest repository secrets.');
               return;
             }
@@ -169,16 +198,19 @@ jobs:
               event_type: 'device-onboarding',
               client_payload: clientPayload,
             });
+            core.setOutput('dispatched', 'true');
             core.info(`Relayed device-onboarding dispatch for @${process.env.TARGET_USER}.`);
 
-      - name: Ensure Privacy Sanitization and Structured Status Marker
-        if: always() && steps.capture_and_redact.outputs.is_device_request == 'true'
-        uses: actions/github-script@v7
+      - name: Ensure Post-Dispatch Ref Marker, Comment & Lock
+        if: always()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
-          JOB_STATUS: ${{ job.status }}
-          REJECT_CODE: ${{ steps.verify_payload.outputs.reject_code }}
-          REJECT_REASON: ${{ steps.verify_payload.outputs.reject_reason }}
-          REQUEST_REF: ${{ steps.verify_payload.outputs.request_ref || steps.capture_and_redact.outputs.initial_request_ref }}
+          DISPATCHED: ${{ steps.dispatch_request.outputs.dispatched }}
+          DISPATCH_OUTCOME: ${{ steps.dispatch_request.outcome }}
+          VALIDATED: ${{ needs.parse_and_verify.outputs.validated }}
+          REJECT_CODE: ${{ needs.parse_and_verify.outputs.reject_code }}
+          REJECT_REASON: ${{ needs.parse_and_verify.outputs.reject_reason }}
+          REQUEST_REF: ${{ needs.parse_and_verify.outputs.request_ref }}
         with:
           script: |
             const fs = require('fs');
@@ -187,43 +219,65 @@ jobs:
             const relay = fs.existsSync(relayPath) ? require(relayPath) : null;
 
             const issueNumber = context.payload.issue.number;
-            const jobStatus = String(process.env.JOB_STATUS || '');
+            const dispatchSucceeded =
+              process.env.VALIDATED === 'true' &&
+              process.env.DISPATCHED === 'true' &&
+              process.env.DISPATCH_OUTCOME === 'success';
             const rejectCode = String(process.env.REJECT_CODE || '').trim() || 'relay_error';
             const rejectReason = String(process.env.REJECT_REASON || '').trim();
             const requestRef = String(process.env.REQUEST_REF || '').trim() || null;
-            const finalRedactedBody = relay
-              ? relay.buildRedactedBody(requestRef)
-              : (requestRef
-                  ? `<!-- sevenlab-ref:${requestRef} -->\n🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*`
-                  : '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*');
 
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-              body: finalRedactedBody,
-              state: 'closed',
-              state_reason: jobStatus === 'success' ? 'completed' : 'not_planned',
-            });
+            // Write request_ref dedup marker ONLY after successful dispatch so transient gateway
+            // failures or rate-limited attempts do not poison genuine retries or bloat markers.
+            const finalRedactedBody = relay
+              ? relay.buildRedactedBody(dispatchSucceeded ? requestRef : null)
+              : '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*';
+
+            try {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: finalRedactedBody,
+                state: 'closed',
+                state_reason: dispatchSucceeded ? 'completed' : 'not_planned',
+              });
+            } catch (err) {
+              core.warning(`Issue body/state finalization failed: ${err.message}`);
+            }
+
+            const safeFallbackPayload = JSON.stringify({
+              v: 1,
+              phase: dispatchSucceeded ? 'relayed' : 'failed',
+              reason_code: dispatchSucceeded ? undefined : rejectCode,
+            }).replace(/-->/g, '--\\u003e').replace(/<!--/g, '\\u003c!--');
 
             const commentBody = relay
-              ? (jobStatus === 'success'
+              ? (dispatchSucceeded
                   ? relay.statusMarker('relayed', requestRef, null, '')
                   : relay.statusMarker('failed', requestRef, rejectCode, rejectReason || 'Errore gateway di inoltro.'))
-              : (jobStatus === 'success'
-                  ? '<!-- sevenlab-accreditation:{"v":1,"phase":"relayed"} -->\n🔒 **SevenLab Relay (`manifest`)**: Richiesta inoltrata.'
-                  : `<!-- sevenlab-accreditation:{"v":1,"phase":"failed","reason_code":"${rejectCode}"} -->\n⚠️ **SevenLab Relay (\`manifest\`)**: Richiesta non inoltrata.`);
+              : (dispatchSucceeded
+                  ? `<!-- sevenlab-accreditation:${safeFallbackPayload} -->\n🔒 **SevenLab Relay (\`manifest\`)**: Richiesta inoltrata.`
+                  : `<!-- sevenlab-accreditation:${safeFallbackPayload} -->\n⚠️ **SevenLab Relay (\`manifest\`)**: Richiesta non inoltrata.`);
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-              body: commentBody,
-            });
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: commentBody,
+              });
+            } catch (err) {
+              core.warning(`Issue status comment failed: ${err.message}`);
+            }
 
-            await github.rest.issues.lock({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issueNumber,
-              lock_reason: 'resolved',
-            });
+            try {
+              await github.rest.issues.lock({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                lock_reason: 'resolved',
+              });
+            } catch (err) {
+              core.warning(`Issue lock failed: ${err.message}`);
+            }

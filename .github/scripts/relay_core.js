@@ -4,12 +4,20 @@ const crypto = require('crypto');
 
 const SEALED_MAGIC = Buffer.from('7LS1', 'ascii');
 const REQUEST_REF_RE = /^[A-Za-z0-9_-]{8,64}$/;
+const HEX64_RE = /^[a-f0-9]{64}$/i;
+const REF_MARKER_RE = /<!--\s*sevenlab-ref:([A-Za-z0-9_-]{8,64})\s*-->/g;
 const USER_IDENTITY_DOMAIN = 'SevenLab-User-Identity-v1:';
 const MAX_CLIENT_PAYLOAD_KEYS = 10;
 const REDACTED_BODY_TEXT = '🔒 *Contenuto payload rimosso automaticamente dal gateway SevenLab.*';
 
 function stripHex64(text) {
   return String(text || '').replace(/[a-f0-9]{64}/gi, '[redacted]');
+}
+
+function sanitizeHtmlCommentPayload(text) {
+  return String(text || '')
+    .replace(/-->/g, '--\\u003e')
+    .replace(/<!--/g, '\\u003c!--');
 }
 
 function classifyIssue(issue) {
@@ -24,15 +32,18 @@ function classifyIssue(issue) {
     title.startsWith('[Device Onboarding]') ||
     title.startsWith('[Device Swap]');
 
-  // Keep legacy plaintext markers intentionally so any accidental plaintext leak
-  // still triggers immediate body redaction, issue closing, locking, and rejection.
-  const hasEnvelopeMarker =
+  // Keep legacy plaintext markers and redacted gateway markers so already-redacted
+  // onboarding issues still count toward the 24h actor quota.
+  const hasEnvelopeOrRedactedMarker =
     body.includes('"sealed"') ||
     body.includes('"hardware_vector"') ||
     body.includes('"machine_hash"') ||
-    body.includes('"cpuid"');
+    body.includes('"cpuid"') ||
+    body.includes('<!-- sevenlab-ref:') ||
+    body.includes('<!-- sevenlab-accreditation:') ||
+    body.includes('Contenuto payload rimosso automaticamente dal gateway SevenLab');
 
-  return Boolean(isDeviceTitle || labels.includes('device-request') || hasEnvelopeMarker);
+  return Boolean(isDeviceTitle || labels.includes('device-request') || hasEnvelopeOrRedactedMarker);
 }
 
 function extractJsonBody(rawBody) {
@@ -63,7 +74,8 @@ function extractRequestRef(rawBody) {
 function buildRedactedBody(requestRef) {
   const rr = requestRef ? String(requestRef).trim() : '';
   if (rr && REQUEST_REF_RE.test(rr)) {
-    return `<!-- sevenlab-ref:${rr} -->\n${REDACTED_BODY_TEXT}`;
+    const safeRr = rr.replace(/--+/g, '-');
+    return `<!-- sevenlab-ref:${safeRr} -->\n${REDACTED_BODY_TEXT}`;
   }
   return REDACTED_BODY_TEXT;
 }
@@ -75,6 +87,24 @@ function computeUserIdentityHash(username) {
     .update(`${USER_IDENTITY_DOMAIN}${clean}`, 'utf8')
     .digest('hex')
     .toLowerCase();
+}
+
+function computeUserIdentityHmac(username, hmacKey) {
+  const clean = String(username || '').trim().toLowerCase().replace(/^@+/, '');
+  return crypto
+    .createHmac('sha256', Buffer.from(String(hmacKey || ''), 'utf8'))
+    .update(`${USER_IDENTITY_DOMAIN}${clean}`, 'utf8')
+    .digest('hex')
+    .toLowerCase();
+}
+
+function timingSafeHexEquals(a, b) {
+  if (!HEX64_RE.test(String(a || '')) || !HEX64_RE.test(String(b || ''))) {
+    return false;
+  }
+  const bufA = Buffer.from(String(a).toLowerCase(), 'hex');
+  const bufB = Buffer.from(String(b).toLowerCase(), 'hex');
+  return bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);
 }
 
 function validateAndParseEnvelope(rawBody, issueUser, _issueTitle) {
@@ -91,7 +121,7 @@ function validateAndParseEnvelope(rawBody, issueUser, _issueTitle) {
   if (parsed.username) {
     const claimed = String(parsed.username).trim().replace(/^@+/, '');
     if (claimed.toLowerCase() !== cleanAuthor.toLowerCase()) {
-      throw new Error(`Identity spoofing rejected: issue author @${cleanAuthor} does not match payload username`);
+      throw new Error('Identity spoofing rejected: issue author does not match payload username.');
     }
   }
 
@@ -110,8 +140,8 @@ function validateAndParseEnvelope(rawBody, issueUser, _issueTitle) {
   }
 
   const version = parsed.v === undefined ? 2 : Number(parsed.v);
-  if (version !== 2) {
-    throw new Error(`Versione envelope sealed non supportata: ${parsed.v}`);
+  if (!Number.isInteger(version) || version !== 2) {
+    throw new Error('Versione envelope sealed non supportata (richiesta v2).');
   }
   const sealedB64 = parsed.sealed.trim();
   if (sealedB64.length > 8192 || !/^[A-Za-z0-9+/=]+$/.test(sealedB64)) {
@@ -160,7 +190,7 @@ function buildDispatchPayload(envelope, issueNumber, nowIso) {
   return clientPayload;
 }
 
-function checkAllowlist(issueUser, allowlistObj) {
+function checkAllowlist(issueUser, allowlistObj, hmacKey) {
   const cleanUser = String(issueUser || '').trim().toLowerCase().replace(/^@+/, '');
   if (!cleanUser) {
     return { allowed: false, reason: 'Identità GitHub mancante.' };
@@ -191,10 +221,33 @@ function checkAllowlist(issueUser, allowlistObj) {
     };
   }
 
-  const normalized = new Set(hashes.map((h) => String(h || '').trim().toLowerCase()));
-  const userHash = computeUserIdentityHash(cleanUser);
-  if (normalized.has(userHash)) {
-    return { allowed: true, reason: 'allowlist_match' };
+  const cleanHmacKey = typeof hmacKey === 'string' ? hmacKey.trim() : '';
+  const isHmacScheme =
+    allowlistObj.hash_scheme === 'hmac-sha256-v1' || Number(allowlistObj.version) >= 2;
+
+  let candidateDigest;
+  if (isHmacScheme) {
+    if (!cleanHmacKey) {
+      return {
+        allowed: false,
+        reason: 'Chiave HMAC allowlist non configurata sul gateway (fail-closed).',
+      };
+    }
+    candidateDigest = computeUserIdentityHmac(cleanUser, cleanHmacKey);
+  } else {
+    if (cleanHmacKey) {
+      return {
+        allowed: false,
+        reason: 'Allowlist v1 unkeyed rifiutata in modalità HMAC-SHA256 (anti-downgrade).',
+      };
+    }
+    candidateDigest = computeUserIdentityHash(cleanUser);
+  }
+
+  for (const rawEntry of hashes) {
+    if (timingSafeHexEquals(rawEntry, candidateDigest)) {
+      return { allowed: true, reason: isHmacScheme ? 'allowlist_hmac_match' : 'allowlist_match' };
+    }
   }
 
   return {
@@ -203,14 +256,27 @@ function checkAllowlist(issueUser, allowlistObj) {
   };
 }
 
+function hasExactRefMarker(bodyText, requestRef) {
+  if (!requestRef || typeof bodyText !== 'string') return false;
+  REF_MARKER_RE.lastIndex = 0;
+  let match;
+  while ((match = REF_MARKER_RE.exec(bodyText)) !== null) {
+    if (match[1] === requestRef) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function rateLimitDecision(recentIssues, nowMs, currentIssueNumber, requestRef, maxPer24h = 3) {
   const cutoff = (typeof nowMs === 'number' ? nowMs : Date.now()) - 24 * 3600 * 1000;
   const list = Array.isArray(recentIssues) ? recentIssues : [];
   let recentCount = 0;
-  const marker = requestRef ? `<!-- sevenlab-ref:${requestRef} -->` : null;
 
   for (const item of list) {
-    if (!item || Number(item.number) === Number(currentIssueNumber)) continue;
+    if (!item || item.pull_request || Number(item.number) === Number(currentIssueNumber)) {
+      continue;
+    }
     const createdMs = Date.parse(item.created_at || '');
     if (Number.isFinite(createdMs) && createdMs >= cutoff) {
       if (classifyIssue(item)) {
@@ -218,7 +284,7 @@ function rateLimitDecision(recentIssues, nowMs, currentIssueNumber, requestRef, 
       }
     }
     const itemBody = typeof item.body === 'string' ? item.body : '';
-    if (requestRef && ((marker && itemBody.includes(marker)) || itemBody.includes(requestRef))) {
+    if (requestRef && hasExactRefMarker(itemBody, requestRef)) {
       return {
         allowed: false,
         duplicate: true,
@@ -241,22 +307,23 @@ function rateLimitDecision(recentIssues, nowMs, currentIssueNumber, requestRef, 
 }
 
 function statusMarker(phase, requestRef, reasonCode, message) {
-  const cleanPhase = String(phase || 'failed').trim().toLowerCase();
+  const cleanPhase = String(phase || 'failed').trim().toLowerCase().slice(0, 32);
   const payload = {
     v: 1,
-    ref: requestRef || null,
+    ref: requestRef && REQUEST_REF_RE.test(String(requestRef)) ? String(requestRef) : null,
     phase: cleanPhase,
     updated_at_utc: new Date().toISOString(),
   };
   if (reasonCode) {
-    payload.reason_code = String(reasonCode).trim();
+    payload.reason_code = sanitizeHtmlCommentPayload(String(reasonCode).trim()).slice(0, 64);
   }
-  const safeMsg = stripHex64(message || '').slice(0, 300);
+  const safeMsg = sanitizeHtmlCommentPayload(stripHex64(message || '')).slice(0, 300);
   if (safeMsg) {
     payload.message = safeMsg;
   }
 
-  const marker = `<!-- sevenlab-accreditation:${JSON.stringify(payload)} -->`;
+  const encodedPayload = sanitizeHtmlCommentPayload(JSON.stringify(payload));
+  const marker = `<!-- sevenlab-accreditation:${encodedPayload} -->`;
   let human;
   if (cleanPhase === 'relayed') {
     human = '🔒 **SevenLab Relay (`manifest`)**: Richiesta verificata e inoltrata al backend SevenLab-SideValidation.';
@@ -280,6 +347,7 @@ module.exports = {
   extractRequestRef,
   buildRedactedBody,
   computeUserIdentityHash,
+  computeUserIdentityHmac,
   validateAndParseEnvelope,
   buildDispatchPayload,
   checkAllowlist,
